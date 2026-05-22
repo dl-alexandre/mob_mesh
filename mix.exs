@@ -22,6 +22,8 @@ defmodule Mob.Mesh.MixProject do
           "README.md",
           "docs/ROUTING_STRATEGY.md",
           "docs/MIGRATION.md",
+          "docs/SECURITY.md",
+          "docs/PERFORMANCE.md",
           "CHANGELOG.md",
           "LICENSE"
         ]
@@ -38,6 +40,8 @@ defmodule Mob.Mesh.MixProject do
   defp deps do
     [
       {:mob_transport, github: "dl-alexandre/mob_transport"},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.40.2", only: :dev, runtime: false}
     ]
   end
@@ -54,6 +58,7 @@ defmodule Mob.Mesh.MixProject do
       files: ~w(
         lib
         docs
+        .github/workflows
         mix.exs
         README.md
         CHANGELOG.md

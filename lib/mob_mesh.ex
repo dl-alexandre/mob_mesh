@@ -8,7 +8,7 @@ defmodule Mob.Mesh do
   wrapped transport.
   """
 
-  alias Mob.Mesh.MeshBridge
+  alias Mob.Mesh.{MeshBridge, Supervisor}
 
   @type peer_id :: Mob.Transport.peer_id()
 
@@ -20,9 +20,25 @@ defmodule Mob.Mesh do
 
   @doc """
   Starts a mesh bridge process.
+
+  Pass a stable `:node_id` in production, such as a persisted device UUID or
+  public-key fingerprint. The generated default is useful for tests and
+  short-lived local processes only.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts), do: MeshBridge.start_link(opts)
+
+  @doc """
+  Returns a child specification for a mesh bridge.
+  """
+  @spec child_spec(keyword()) :: Elixir.Supervisor.child_spec()
+  def child_spec(opts), do: MeshBridge.child_spec(opts)
+
+  @doc """
+  Starts a supervisor containing one mesh bridge.
+  """
+  @spec start_supervised(keyword()) :: Elixir.Supervisor.on_start()
+  def start_supervised(opts), do: Supervisor.start_link(opts)
 
   @doc """
   Sends an application payload through the mesh.

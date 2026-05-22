@@ -58,14 +58,12 @@ defmodule Mob.Mesh.Router do
   def route(%Envelope{destination: destination}, peer_routes, opts \\ []) do
     excluded = Keyword.get(opts, :exclude, MapSet.new())
 
-    cond do
-      Map.has_key?(peer_routes, destination) and not MapSet.member?(excluded, destination) ->
-        %{transport: transport} = Map.fetch!(peer_routes, destination)
-        {:direct, transport, destination}
-
-      true ->
-        flood = flood_targets(peer_routes, excluded)
-        if flood == [], do: :store, else: {:flood, flood}
+    if Map.has_key?(peer_routes, destination) and not MapSet.member?(excluded, destination) do
+      %{transport: transport} = Map.fetch!(peer_routes, destination)
+      {:direct, transport, destination}
+    else
+      flood = flood_targets(peer_routes, excluded)
+      if flood == [], do: :store, else: {:flood, flood}
     end
   end
 

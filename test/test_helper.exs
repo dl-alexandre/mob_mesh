@@ -28,14 +28,15 @@ defmodule Mob.Mesh.FakeTransport do
     {:ok,
      %{
        event_target: Keyword.fetch!(opts, :event_target),
-       owner: Keyword.get(opts, :owner, self())
+       owner: Keyword.get(opts, :owner, self()),
+       send_reply: Keyword.get(opts, :send_reply, :ok)
      }}
   end
 
   @impl true
   def handle_call({:send_frame, peer_id, frame, opts}, _from, state) do
     send(state.owner, {:fake_transport_send, peer_id, frame, opts})
-    {:reply, :ok, state}
+    {:reply, state.send_reply, state}
   end
 
   def handle_call({:broadcast_frame, frame, opts}, _from, state) do

@@ -12,7 +12,9 @@ defmodule Mob.Mesh.MeshBridge do
 
   @behaviour Mob.Transport
 
-  alias Mob.Mesh.{Discovery, Router, Store}
+  require Logger
+
+  alias Mob.Mesh.{Discovery, Router, SeenCache, Store}
   alias Mob.Mesh.Router.Envelope
   alias Mob.Transport.Adapter
 
@@ -20,6 +22,18 @@ defmodule Mob.Mesh.MeshBridge do
 
   @impl true
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+  @doc false
+  @spec child_spec(keyword()) :: Supervisor.child_spec()
+  def child_spec(opts) do
+    %{
+      id: Keyword.get(opts, :id, __MODULE__),
+      start: {__MODULE__, :start_link, [opts]},
+      type: :worker,
+      restart: :permanent,
+      shutdown: 5_000
+    }
+  end
 
   @impl true
   def send_frame(mesh, peer_id, frame, opts) when is_binary(frame) do
@@ -57,10 +71,9 @@ defmodule Mob.Mesh.MeshBridge do
          event_target: event_target,
          adapters: adapters,
          peer_routes: %{},
-         seen: MapSet.new(),
+         seen: SeenCache.new(Keyword.get(opts, :seen_limit, 4_096)),
          discovery: discovery,
-         store: store,
-         seen_limit: Keyword.get(opts, :seen_limit, 4_096)
+         store: store
        }}
     end
   end
@@ -131,7 +144,7 @@ defmodule Mob.Mesh.MeshBridge do
 
   defp handle_envelope(peer_id, envelope, state) do
     cond do
-      MapSet.member?(state.seen, envelope.id) ->
+      SeenCache.member?(state.seen, envelope.id) ->
         state
 
       local_destination?(envelope, state) ->
@@ -163,10 +176,14 @@ defmodule Mob.Mesh.MeshBridge do
   defp dispatch_or_store(envelope, state, opts \\ []) do
     case Router.route(envelope, state.peer_routes, opts) do
       {:direct, transport, peer_id} ->
-        {send_envelope(state, transport, peer_id, envelope), state}
+        reply = send_envelope(state, transport, peer_id, envelope)
+        if reply != :ok, do: report_send_error(state, envelope, [{transport, peer_id, reply}])
+        {reply, state}
 
       {:flood, targets} ->
-        {flood_envelope(state, targets, envelope), state}
+        {reply, failures} = flood_envelope(state, targets, envelope)
+        if failures != [], do: report_send_error(state, envelope, failures)
+        {reply, state}
 
       :store ->
         :ok = Store.put(state.store, envelope.destination, envelope)
@@ -192,14 +209,22 @@ defmodule Mob.Mesh.MeshBridge do
   defp flood_envelope(state, targets, envelope) do
     results =
       Enum.map(targets, fn {transport, peer_id} ->
-        send_envelope(state, transport, peer_id, envelope)
+        {transport, peer_id, send_envelope(state, transport, peer_id, envelope)}
       end)
 
-    if Enum.any?(results, &(&1 == :ok)) do
-      :ok
+    failures = Enum.reject(results, fn {_transport, _peer_id, result} -> result == :ok end)
+
+    if Enum.any?(results, fn {_transport, _peer_id, result} -> result == :ok end) do
+      {:ok, failures}
     else
-      {:error, {:no_successful_relay, results}}
+      {{:error, {:no_successful_relay, results}}, failures}
     end
+  end
+
+  defp report_send_error(state, envelope, failures) do
+    reason = {:mesh_send_failed, envelope.id, failures}
+    Logger.debug("mob_mesh send failed: #{inspect(reason)}")
+    send(state.event_target, {:transport_error, reason})
   end
 
   defp encode(%Envelope{} = envelope) do
@@ -299,13 +324,7 @@ defmodule Mob.Mesh.MeshBridge do
   end
 
   defp remember(id, state) do
-    seen =
-      state.seen
-      |> MapSet.put(id)
-      |> Enum.take(state.seen_limit)
-      |> MapSet.new()
-
-    %{state | seen: seen}
+    %{state | seen: SeenCache.put(state.seen, id)}
   end
 
   defp default_node_id do

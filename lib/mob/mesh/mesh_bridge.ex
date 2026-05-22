@@ -14,7 +14,7 @@ defmodule Mob.Mesh.MeshBridge do
 
   require Logger
 
-  alias Mob.Mesh.{Discovery, Router, SeenCache, Store}
+  alias Mob.Mesh.{Discovery, Router, SeenCache, Store, Telemetry}
   alias Mob.Mesh.Router.Envelope
   alias Mob.Transport.Adapter
 
@@ -107,6 +107,13 @@ defmodule Mob.Mesh.MeshBridge do
     :ok = Discovery.peer_up(state.discovery, transport, peer_id, metadata)
 
     state = put_peer_route(state, peer_id, transport, metadata)
+
+    Telemetry.emit(
+      [:peer, :discovered],
+      %{count: 1},
+      peer_metadata(state, peer_id, transport, metadata)
+    )
+
     replay_stored(peer_id, state)
     send(state.event_target, {:transport_up, peer_id, metadata})
 
@@ -115,6 +122,7 @@ defmodule Mob.Mesh.MeshBridge do
 
   def handle_info({:transport_down, peer_id}, state) do
     :ok = Discovery.peer_down(state.discovery, peer_id)
+    Telemetry.emit([:peer, :down], %{count: 1}, %{node_id: state.node_id, peer_id: peer_id})
     send(state.event_target, {:transport_down, peer_id})
     {:noreply, %{state | peer_routes: Map.delete(state.peer_routes, peer_id)}}
   end
@@ -151,6 +159,12 @@ defmodule Mob.Mesh.MeshBridge do
         send(state.event_target, {:frame, envelope.source, envelope.payload})
         state = remember(envelope.id, state)
 
+        Telemetry.emit(
+          [:message, :delivered],
+          message_measurements(envelope, state),
+          message_metadata(envelope, state)
+        )
+
         if envelope.destination == :broadcast do
           maybe_relay(peer_id, envelope, state)
         else
@@ -178,15 +192,25 @@ defmodule Mob.Mesh.MeshBridge do
       {:direct, transport, peer_id} ->
         reply = send_envelope(state, transport, peer_id, envelope)
         if reply != :ok, do: report_send_error(state, envelope, [{transport, peer_id, reply}])
+        if reply == :ok, do: emit_sent(envelope, state, [{transport, peer_id}])
         {reply, state}
 
       {:flood, targets} ->
         {reply, failures} = flood_envelope(state, targets, envelope)
         if failures != [], do: report_send_error(state, envelope, failures)
+        emit_relay_result(reply, envelope, state, targets, failures)
         {reply, state}
 
       :store ->
         :ok = Store.put(state.store, envelope.destination, envelope)
+
+        Telemetry.emit([:message, :stored], message_measurements(envelope, state), %{
+          node_id: state.node_id,
+          message_id: envelope.id,
+          destination: envelope.destination,
+          queue_depth: store_depth(state.store, envelope.destination)
+        })
+
         {:ok, state}
     end
   end
@@ -224,6 +248,14 @@ defmodule Mob.Mesh.MeshBridge do
   defp report_send_error(state, envelope, failures) do
     reason = {:mesh_send_failed, envelope.id, failures}
     Logger.debug("mob_mesh send failed: #{inspect(reason)}")
+
+    Telemetry.emit([:message, :error], %{count: 1}, %{
+      node_id: state.node_id,
+      message_id: envelope.id,
+      destination: envelope.destination,
+      reason: reason
+    })
+
     send(state.event_target, {:transport_error, reason})
   end
 
@@ -324,10 +356,64 @@ defmodule Mob.Mesh.MeshBridge do
   end
 
   defp remember(id, state) do
-    %{state | seen: SeenCache.put(state.seen, id)}
+    seen = SeenCache.put(state.seen, id)
+    Telemetry.emit([:seen, :size], %{size: SeenCache.size(seen)}, %{node_id: state.node_id})
+    %{state | seen: seen}
   end
 
   defp default_node_id do
     {:node, node(), self()}
+  end
+
+  defp emit_sent(envelope, state, targets) do
+    Telemetry.emit([:message, :sent], message_measurements(envelope, state), %{
+      node_id: state.node_id,
+      message_id: envelope.id,
+      destination: envelope.destination,
+      targets: targets
+    })
+  end
+
+  defp emit_relay_result(:ok, envelope, state, targets, failures) do
+    successful_targets =
+      targets -- Enum.map(failures, fn {transport, peer_id, _reason} -> {transport, peer_id} end)
+
+    Telemetry.emit([:message, :relayed], message_measurements(envelope, state), %{
+      node_id: state.node_id,
+      message_id: envelope.id,
+      destination: envelope.destination,
+      targets: successful_targets,
+      failures: failures
+    })
+  end
+
+  defp emit_relay_result({:error, _reason}, _envelope, _state, _targets, _failures), do: :ok
+
+  defp message_measurements(envelope, state) do
+    %{
+      bytes: byte_size(envelope.payload),
+      ttl: envelope.ttl,
+      seen_size: SeenCache.size(state.seen)
+    }
+  end
+
+  defp message_metadata(envelope, state) do
+    %{
+      node_id: state.node_id,
+      message_id: envelope.id,
+      source: envelope.source,
+      destination: envelope.destination
+    }
+  end
+
+  defp peer_metadata(state, peer_id, transport, metadata) do
+    %{node_id: state.node_id, peer_id: peer_id, transport: transport, metadata: metadata}
+  end
+
+  defp store_depth(store, destination) do
+    store
+    |> Store.list()
+    |> Map.get(destination, [])
+    |> length()
   end
 end

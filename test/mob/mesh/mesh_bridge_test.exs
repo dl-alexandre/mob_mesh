@@ -22,6 +22,8 @@ defmodule Mob.Mesh.MeshBridgeTest do
   end
 
   test "stores outbound messages when no route exists and replays when peer appears" do
+    attach_telemetry([[:mob_mesh, :message, :stored], [:mob_mesh, :peer, :discovered]])
+
     {:ok, bridge} =
       MeshBridge.start_link(
         event_target: self(),
@@ -30,9 +32,14 @@ defmodule Mob.Mesh.MeshBridgeTest do
       )
 
     assert :ok = MeshBridge.send_frame(bridge, :node_b, "queued", [])
+    assert_receive {:telemetry_event, [:mob_mesh, :message, :stored], %{bytes: 6}, metadata}
+    assert %{node_id: :node_a, destination: :node_b, queue_depth: 1} = metadata
     assert %{node_b: [_envelope]} = MeshBridge.stored(bridge)
 
     send(bridge, {:transport_up, :node_b, %{transport: :ble}})
+
+    assert_receive {:telemetry_event, [:mob_mesh, :peer, :discovered], %{count: 1},
+                    %{node_id: :node_a, peer_id: :node_b, transport: :ble}}
 
     assert_receive {:transport_up, :node_b, %{transport: :ble}}
     assert_receive {:fake_transport_send, :node_b, _frame, []}
@@ -40,6 +47,8 @@ defmodule Mob.Mesh.MeshBridgeTest do
   end
 
   test "emits transport errors when a direct send fails" do
+    attach_telemetry([[:mob_mesh, :message, :error]])
+
     {:ok, bridge} =
       MeshBridge.start_link(
         event_target: self(),
@@ -57,9 +66,14 @@ defmodule Mob.Mesh.MeshBridgeTest do
 
     assert_receive {:transport_error,
                     {:mesh_send_failed, _message_id, [{:ble, :node_b, {:error, :offline}}]}}
+
+    assert_receive {:telemetry_event, [:mob_mesh, :message, :error], %{count: 1},
+                    %{node_id: :node_a, destination: :node_b}}
   end
 
   test "delivers mesh envelopes addressed to the local node" do
+    attach_telemetry([[:mob_mesh, :message, :sent], [:mob_mesh, :message, :delivered]])
+
     {:ok, node_a} =
       MeshBridge.start_link(
         event_target: self(),
@@ -79,9 +93,40 @@ defmodule Mob.Mesh.MeshBridgeTest do
 
     assert :ok = MeshBridge.send_frame(node_a, :node_b, "hello", [])
     assert_receive {:fake_transport_send, :node_b, frame, []}
+    assert_receive {:telemetry_event, [:mob_mesh, :message, :sent], %{bytes: 5}, metadata}
+    assert %{node_id: :node_a, destination: :node_b, targets: [ble: :node_b]} = metadata
 
     send(node_b, {:frame, :node_a, frame})
     assert_receive {:frame, :node_a, "hello"}
+
+    assert_receive {:telemetry_event, [:mob_mesh, :message, :delivered], %{bytes: 5},
+                    %{node_id: :node_b, source: :node_a, destination: :node_b}}
+  end
+
+  test "emits relay telemetry for flooded multi-hop sends" do
+    attach_telemetry([[:mob_mesh, :message, :relayed]])
+
+    {:ok, bridge} =
+      MeshBridge.start_link(
+        event_target: self(),
+        node_id: :node_a,
+        transports: [{:ble, Mob.Mesh.FakeTransport, transport_opts: [owner: self()]}]
+      )
+
+    send(bridge, {:transport_up, :node_b, %{transport: :ble}})
+    send(bridge, {:transport_up, :node_c, %{transport: :ble}})
+    assert_receive {:transport_up, :node_b, %{transport: :ble}}
+    assert_receive {:transport_up, :node_c, %{transport: :ble}}
+
+    assert :ok = MeshBridge.send_frame(bridge, :node_z, "flood", ttl: 2)
+
+    assert_receive {:fake_transport_send, :node_b, _frame_b, []}
+    assert_receive {:fake_transport_send, :node_c, _frame_c, []}
+
+    assert_receive {:telemetry_event, [:mob_mesh, :message, :relayed], %{bytes: 5},
+                    %{node_id: :node_a, destination: :node_z, targets: targets}}
+
+    assert Enum.sort(targets) == [ble: :node_b, ble: :node_c]
   end
 
   test "can be used as a child in a supervision tree" do
@@ -98,5 +143,24 @@ defmodule Mob.Mesh.MeshBridgeTest do
 
     [{_, bridge, _, _}] = Supervisor.which_children(supervisor)
     assert is_pid(bridge)
+  end
+
+  defp attach_telemetry(events) do
+    test_pid = self()
+    ref = make_ref()
+
+    :ok =
+      :telemetry.attach_many(
+        "mesh-bridge-test-#{inspect(ref)}",
+        events,
+        &__MODULE__.handle_telemetry/4,
+        test_pid
+      )
+
+    on_exit(fn -> :telemetry.detach("mesh-bridge-test-#{inspect(ref)}") end)
+  end
+
+  def handle_telemetry(event, measurements, metadata, test_pid) do
+    send(test_pid, {:telemetry_event, event, measurements, metadata})
   end
 end

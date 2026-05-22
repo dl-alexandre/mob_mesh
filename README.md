@@ -20,6 +20,7 @@ The initial implementation provides:
 - Duplicate suppression.
 - Process-local store-and-forward queue for offline destinations.
 - Discovery state for peers learned from underlying transports.
+- Telemetry for sent, relayed, delivered, stored, peer, and error events.
 
 ## Architecture
 
@@ -97,6 +98,41 @@ Mob.Mesh.start_supervised(
 - Send option `:ttl` - relay depth for a message. Defaults to `8`.
 - Send option `:message_id` - override the generated message ID, mainly useful
   for tests.
+
+## Telemetry
+
+`mob_mesh` emits telemetry events that are useful when debugging real devices:
+
+```elixir
+[:mob_mesh, :message, :sent]
+[:mob_mesh, :message, :relayed]
+[:mob_mesh, :message, :delivered]
+[:mob_mesh, :message, :stored]
+[:mob_mesh, :message, :error]
+[:mob_mesh, :peer, :discovered]
+[:mob_mesh, :peer, :down]
+[:mob_mesh, :seen, :size]
+```
+
+Example:
+
+```elixir
+:telemetry.attach_many(
+  "mob-mesh-logger",
+  [
+    [:mob_mesh, :message, :sent],
+    [:mob_mesh, :message, :relayed],
+    [:mob_mesh, :message, :error],
+    [:mob_mesh, :peer, :discovered]
+  ],
+  fn event, measurements, metadata, _config ->
+    Logger.debug(
+      "mob_mesh event=#{inspect(event)} measurements=#{inspect(measurements)} metadata=#{inspect(metadata)}"
+    )
+  end,
+  nil
+)
+```
 
 ## When To Use It
 

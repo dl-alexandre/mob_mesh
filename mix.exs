@@ -12,6 +12,7 @@ defmodule Mob.Mesh.MixProject do
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
+      dialyzer: dialyzer(),
       description: @description,
       package: package(),
       source_url: @github_url,
@@ -33,16 +34,26 @@ defmodule Mob.Mesh.MixProject do
 
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: [:logger, :telemetry]
     ]
   end
 
   defp deps do
     [
       {:mob_transport, github: "dl-alexandre/mob_transport"},
+      {:telemetry, "~> 1.3"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.40.2", only: :dev, runtime: false}
+    ]
+  end
+
+  defp dialyzer do
+    [
+      plt_local_path: "_build/plts",
+      plt_core_path: "_build/plts",
+      plt_add_apps: [:mix, :ex_unit],
+      flags: [:error_handling, :unknown, :unmatched_returns]
     ]
   end
 

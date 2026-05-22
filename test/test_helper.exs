@@ -1,5 +1,7 @@
 ExUnit.start()
 
+Application.ensure_all_started(:telemetry)
+
 defmodule Mob.Mesh.FakeTransport do
   @moduledoc false
 

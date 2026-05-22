@@ -12,3 +12,11 @@ To migrate a point-to-point transport into the mesh:
 The bridge currently uses an internal Erlang-term envelope between mesh nodes.
 That format is private and should be replaced with a stable wire envelope before
 cross-version compatibility is required.
+
+Use telemetry during migration to compare direct transport delivery with mesh
+delivery:
+
+- `[:mob_mesh, :message, :sent]`
+- `[:mob_mesh, :message, :relayed]`
+- `[:mob_mesh, :message, :stored]`
+- `[:mob_mesh, :message, :error]`

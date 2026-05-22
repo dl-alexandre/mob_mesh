@@ -9,6 +9,8 @@ Current controls:
 - `:ttl` on outbound sends limits relay depth.
 - `:seen_limit` bounds duplicate-suppression memory.
 - `:store_opts` can cap the in-memory store queue.
+- Telemetry reports queue depth, seen-cache size, sent bytes, and relay/error
+  events.
 
 Mobile guidance:
 
@@ -18,6 +20,5 @@ Mobile guidance:
 - Tune BLE scan/advertising behavior in the underlying transport, not in
   `mob_mesh`.
 
-Planned improvements include telemetry, configurable fan-out, probabilistic
-forwarding, and routing scores based on metadata such as link quality or battery
-state.
+Planned improvements include configurable fan-out, probabilistic forwarding, and
+routing scores based on metadata such as link quality or battery state.

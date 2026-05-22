@@ -62,8 +62,9 @@ defmodule Mob.Mesh.MeshBridge do
 
     with {:ok, event_target} <- fetch_event_target(opts),
          {:ok, transports} <- fetch_transports(opts),
+         {:ok, store_module} <- fetch_store(opts),
          {:ok, discovery} <- Discovery.start_link([]),
-         {:ok, store} <- Store.start_link(store_opts(opts)),
+         {:ok, store} <- start_store(store_module, store_opts(opts)),
          {:ok, adapters} <- start_adapters(transports) do
       {:ok,
        %{
@@ -73,7 +74,8 @@ defmodule Mob.Mesh.MeshBridge do
          peer_routes: %{},
          seen: SeenCache.new(Keyword.get(opts, :seen_limit, 4_096)),
          discovery: discovery,
-         store: store
+         store: store,
+         store_module: store_module
        }}
     end
   end
@@ -92,7 +94,7 @@ defmodule Mob.Mesh.MeshBridge do
   end
 
   def handle_call(:peers, _from, state), do: {:reply, Discovery.peers(state.discovery), state}
-  def handle_call(:stored, _from, state), do: {:reply, Store.list(state.store), state}
+  def handle_call(:stored, _from, state), do: {:reply, store_list(state), state}
 
   @impl true
   def handle_info({:EXIT, pid, reason}, state) do
@@ -202,13 +204,13 @@ defmodule Mob.Mesh.MeshBridge do
         {reply, state}
 
       :store ->
-        :ok = Store.put(state.store, envelope.destination, envelope)
+        :ok = store_put(state, envelope.destination, envelope)
 
         Telemetry.emit([:message, :stored], message_measurements(envelope, state), %{
           node_id: state.node_id,
           message_id: envelope.id,
           destination: envelope.destination,
-          queue_depth: store_depth(state.store, envelope.destination)
+          queue_depth: store_depth(state, envelope.destination)
         })
 
         {:ok, state}
@@ -217,7 +219,7 @@ defmodule Mob.Mesh.MeshBridge do
 
   defp replay_stored(peer_id, state) do
     state.store
-    |> Store.pop(peer_id)
+    |> state.store_module.pop(peer_id)
     |> Enum.each(fn envelope ->
       _ = dispatch_or_store(envelope, state)
     end)
@@ -298,6 +300,31 @@ defmodule Mob.Mesh.MeshBridge do
 
   defp store_opts(opts) do
     Keyword.get(opts, :store_opts, [])
+  end
+
+  defp fetch_store(opts) do
+    store = Keyword.get(opts, :store, Store)
+
+    cond do
+      not is_atom(store) ->
+        {:error, {:invalid_store, store}}
+
+      Code.ensure_loaded?(store) and function_exported?(store, :start_link, 1) and
+        function_exported?(store, :put, 3) and function_exported?(store, :pop, 2) and
+          function_exported?(store, :list, 1) ->
+        {:ok, store}
+
+      true ->
+        {:error, {:invalid_store, store}}
+    end
+  end
+
+  defp start_store(store, opts) do
+    case store.start_link(opts) do
+      {:ok, pid} when is_pid(pid) -> {:ok, pid}
+      {:error, reason} -> {:error, {:store_start_failed, reason}}
+      other -> {:error, {:invalid_store_start_return, other}}
+    end
   end
 
   defp start_adapters(transports) do
@@ -410,10 +437,15 @@ defmodule Mob.Mesh.MeshBridge do
     %{node_id: state.node_id, peer_id: peer_id, transport: transport, metadata: metadata}
   end
 
-  defp store_depth(store, destination) do
-    store
-    |> Store.list()
+  defp store_depth(state, destination) do
+    state
+    |> store_list()
     |> Map.get(destination, [])
     |> length()
   end
+
+  defp store_put(state, destination, envelope),
+    do: state.store_module.put(state.store, destination, envelope)
+
+  defp store_list(state), do: state.store_module.list(state.store)
 end

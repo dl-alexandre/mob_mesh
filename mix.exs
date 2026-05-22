@@ -42,8 +42,8 @@ defmodule Mob.Mesh.MixProject do
     [
       {:mob_transport, github: "dl-alexandre/mob_transport"},
       {:telemetry, "~> 1.3"},
-      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:credo, "~> 1.7", only: :dev, runtime: false},
+      {:dialyxir, "~> 1.4", only: :dev, runtime: false},
       {:ex_doc, "~> 0.40.2", only: :dev, runtime: false}
     ]
   end

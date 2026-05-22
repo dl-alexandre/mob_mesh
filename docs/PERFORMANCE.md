@@ -8,7 +8,8 @@ Current controls:
 
 - `:ttl` on outbound sends limits relay depth.
 - `:seen_limit` bounds duplicate-suppression memory.
-- `:store_opts` can cap the in-memory store queue.
+- `:store` can replace the in-memory queue with a persistent backend.
+- `:store_opts` can cap or configure the selected store backend.
 - Telemetry reports queue depth, seen-cache size, sent bytes, and relay/error
   events.
 

@@ -92,9 +92,12 @@ Mob.Mesh.start_supervised(
   is generated.
 - `:transports` - list of `{name, transport_module, opts}` or
   `{name, transport_module}` entries.
+- `:store` - optional module implementing `Mob.Mesh.Store.Behaviour`. Defaults
+  to the in-memory `Mob.Mesh.Store`.
 - `:seen_limit` - maximum duplicate-suppression IDs retained. Defaults to
   `4_096`.
-- `:store_opts` - options for the in-memory store. `:limit` defaults to `1_000`.
+- `:store_opts` - options for the selected store. The default in-memory store
+  supports `:limit`, defaulting to `1_000`.
 - Send option `:ttl` - relay depth for a message. Defaults to `8`.
 - Send option `:message_id` - override the generated message ID, mainly useful
   for tests.
@@ -146,6 +149,27 @@ important than reach.
 The current router uses epidemic flooding. Keep TTL low on BLE-heavy mobile
 networks, keep payloads compact, and tune scan/advertising intervals in the
 underlying transport. See [Performance](docs/PERFORMANCE.md) for more detail.
+
+## Store Backends
+
+The default store is process-local and in memory. Mobile apps that need durable
+delivery should provide a persistent backend:
+
+```elixir
+defmodule MyApp.MeshStore do
+  @behaviour Mob.Mesh.Store.Behaviour
+
+  # start_link/1, put/3, pop/2, and list/1
+end
+
+Mob.Mesh.start_link(
+  event_target: self(),
+  node_id: "persisted-device-id",
+  store: MyApp.MeshStore,
+  store_opts: [path: "/data/user/0/app/files/mesh.sqlite3"],
+  transports: [{:ble, Mob.Ble.MobileBridge, transport_opts: []}]
+)
+```
 
 ## Security
 

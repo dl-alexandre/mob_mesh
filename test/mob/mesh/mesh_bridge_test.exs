@@ -46,6 +46,26 @@ defmodule Mob.Mesh.MeshBridgeTest do
     assert %{} = MeshBridge.stored(bridge)
   end
 
+  test "supports a custom store backend" do
+    {:ok, bridge} =
+      MeshBridge.start_link(
+        event_target: self(),
+        node_id: :node_a,
+        store: Mob.Mesh.FakeStore,
+        store_opts: [owner: self()],
+        transports: [{:ble, Mob.Mesh.FakeTransport, transport_opts: [owner: self()]}]
+      )
+
+    assert :ok = MeshBridge.send_frame(bridge, :node_b, "queued", [])
+    assert_receive {:fake_store_put, :node_b, _envelope}
+    assert %{node_b: [_envelope]} = MeshBridge.stored(bridge)
+
+    send(bridge, {:transport_up, :node_b, %{transport: :ble}})
+
+    assert_receive {:fake_store_pop, :node_b}
+    assert_receive {:fake_transport_send, :node_b, _frame, []}
+  end
+
   test "emits transport errors when a direct send fails" do
     attach_telemetry([[:mob_mesh, :message, :error]])
 
@@ -127,6 +147,43 @@ defmodule Mob.Mesh.MeshBridgeTest do
                     %{node_id: :node_a, destination: :node_z, targets: targets}}
 
     assert Enum.sort(targets) == [ble: :node_b, ble: :node_c]
+  end
+
+  test "relays a unicast message across three mesh nodes" do
+    {:ok, node_a} =
+      MeshBridge.start_link(
+        event_target: self(),
+        node_id: :node_a,
+        transports: [{:ble, Mob.Mesh.FakeTransport, transport_opts: [owner: self()]}]
+      )
+
+    {:ok, node_b} =
+      MeshBridge.start_link(
+        event_target: self(),
+        node_id: :node_b,
+        transports: [{:ble, Mob.Mesh.FakeTransport, transport_opts: [owner: self()]}]
+      )
+
+    {:ok, node_c} =
+      MeshBridge.start_link(
+        event_target: self(),
+        node_id: :node_c,
+        transports: [{:ble, Mob.Mesh.FakeTransport, transport_opts: [owner: self()]}]
+      )
+
+    send(node_a, {:transport_up, :node_b, %{transport: :ble}})
+    send(node_b, {:transport_up, :node_c, %{transport: :ble}})
+    assert_receive {:transport_up, :node_b, %{transport: :ble}}
+    assert_receive {:transport_up, :node_c, %{transport: :ble}}
+
+    assert :ok = MeshBridge.send_frame(node_a, :node_c, "multi-hop", ttl: 3)
+    assert_receive {:fake_transport_send, :node_b, frame_ab, []}
+
+    send(node_b, {:frame, :node_a, frame_ab})
+    assert_receive {:fake_transport_send, :node_c, frame_bc, []}
+
+    send(node_c, {:frame, :node_b, frame_bc})
+    assert_receive {:frame, :node_a, "multi-hop"}
   end
 
   test "can be used as a child in a supervision tree" do

@@ -46,3 +46,48 @@ defmodule Mob.Mesh.FakeTransport do
     {:reply, :ok, state}
   end
 end
+
+defmodule Mob.Mesh.FakeStore do
+  @moduledoc false
+
+  @behaviour Mob.Mesh.Store.Behaviour
+
+  use GenServer
+
+  @impl true
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+  @impl true
+  def put(store, destination, envelope), do: GenServer.call(store, {:put, destination, envelope})
+
+  @impl true
+  def pop(store, destination), do: GenServer.call(store, {:pop, destination})
+
+  @impl true
+  def list(store), do: GenServer.call(store, :list)
+
+  @impl true
+  def init(opts) do
+    {:ok, %{queues: %{}, owner: Keyword.get(opts, :owner)}}
+  end
+
+  @impl true
+  def handle_call({:put, destination, envelope}, _from, state) do
+    if state.owner, do: send(state.owner, {:fake_store_put, destination, envelope})
+    queues = Map.update(state.queues, destination, [envelope], &[envelope | &1])
+    {:reply, :ok, %{state | queues: queues}}
+  end
+
+  def handle_call({:pop, destination}, _from, state) do
+    if state.owner, do: send(state.owner, {:fake_store_pop, destination})
+    {queue, queues} = Map.pop(state.queues, destination, [])
+    {:reply, Enum.reverse(queue), %{state | queues: queues}}
+  end
+
+  def handle_call(:list, _from, state) do
+    queues =
+      Map.new(state.queues, fn {destination, queue} -> {destination, Enum.reverse(queue)} end)
+
+    {:reply, queues, state}
+  end
+end

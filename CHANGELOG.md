@@ -8,3 +8,4 @@
   CI checks, and expanded mobile/security/performance docs.
 - Telemetry hooks for mesh messages, peer discovery, queue depth, and seen-cache
   size.
+- Pluggable store behaviour for durable store-and-forward backends.

@@ -8,25 +8,31 @@ defmodule Mob.Mesh.Store do
 
   use GenServer
 
+  @behaviour Mob.Mesh.Store.Behaviour
+
   alias Mob.Mesh.Router.Envelope
 
   @type destination :: term()
 
+  @impl Mob.Mesh.Store.Behaviour
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts)
   end
 
-  @spec put(GenServer.server(), destination(), Envelope.t()) :: :ok
+  @impl Mob.Mesh.Store.Behaviour
+  @spec put(GenServer.server(), destination(), Envelope.t()) :: :ok | {:error, term()}
   def put(store, destination, %Envelope{} = envelope) do
     GenServer.call(store, {:put, destination, envelope})
   end
 
+  @impl Mob.Mesh.Store.Behaviour
   @spec pop(GenServer.server(), destination()) :: [Envelope.t()]
   def pop(store, destination) do
     GenServer.call(store, {:pop, destination})
   end
 
+  @impl Mob.Mesh.Store.Behaviour
   @spec list(GenServer.server()) :: %{optional(destination()) => [Envelope.t()]}
   def list(store) do
     GenServer.call(store, :list)

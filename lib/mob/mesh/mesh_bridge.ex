@@ -1,15 +1,26 @@
 defmodule Mob.Mesh.MeshBridge do
   @moduledoc """
-  `Mob.Transport` implementation that turns point-to-point transports into a mesh.
+  `Mob.Transport` implementation for mesh routing.
 
-  The bridge owns one or more underlying `Mob.Transport.Adapter` processes. It
-  wraps outbound payloads in a small internal envelope, suppresses duplicate
-  inbound mesh messages, delivers local payloads to its `:event_target`, and
-  relays messages with epidemic flooding while TTL remains.
+  MeshBridge owns the Discovery/Router/SeenCache/Store logic for epidemic
+  routing and duplicate suppression. It is intended to turn point-to-point
+  `Mob.Transport` plugins into a mesh by receiving events from underlying
+  transports and delivering payloads to its `:event_target`.
+
+  The `:transports` option starts wrapped `Mob.Transport.Adapter` children and
+  uses those adapters for direct and flooded sends. Transports may also be
+  managed externally by forwarding their events directly to this bridge as the
+  event target.
+
+  NOTE: Mesh remains on legacy event shapes (`{:transport_up, ...}`,
+  `{:transport_down, ...}`, `{:frame, ...}`, `{:transport_error, ...}`) until
+  full alignment with `Mob.Transport.Event` normalized `{:mob_transport, :mesh, ...}`
+  shapes. The Adapter-era internal logic (state tracking, helpers) has been
+  pruned; peer transport identity (when not supplied in forwarded metadata)
+  uses an explicit sentinel to avoid nils.
   """
 
   use GenServer
-
   @behaviour Mob.Transport
 
   require Logger
@@ -49,12 +60,18 @@ defmodule Mob.Mesh.MeshBridge do
   def stop(mesh), do: GenServer.stop(mesh)
 
   @doc false
-  @spec peers(GenServer.server()) :: map()
+  @spec peers(GenServer.server()) :: [Mob.Transport.peer_id()]
   def peers(mesh), do: GenServer.call(mesh, :peers)
 
   @doc false
   @spec stored(GenServer.server()) :: map()
   def stored(mesh), do: GenServer.call(mesh, :stored)
+
+  @doc "Transport capabilities advertised by this plugin."
+  def capabilities, do: [:mesh]
+
+  @doc "Static transport metadata."
+  def metadata, do: %{routing: :epidemic}
 
   @impl true
   def init(opts) do
@@ -70,8 +87,8 @@ defmodule Mob.Mesh.MeshBridge do
        %{
          node_id: Keyword.get_lazy(opts, :node_id, &default_node_id/0),
          event_target: event_target,
-         adapters: adapters,
          peer_routes: %{},
+         adapters: adapters,
          seen: SeenCache.new(Keyword.get(opts, :seen_limit, 4_096)),
          discovery: discovery,
          store: store,
@@ -87,25 +104,49 @@ defmodule Mob.Mesh.MeshBridge do
     {:reply, reply, remember(envelope.id, state)}
   end
 
+  @impl true
   def handle_call({:broadcast_frame, frame, opts}, _from, state) do
     envelope = Router.envelope(state.node_id, :broadcast, frame, opts)
     {reply, state} = dispatch_or_store(envelope, state)
     {:reply, reply, remember(envelope.id, state)}
   end
 
-  def handle_call(:peers, _from, state), do: {:reply, Discovery.peers(state.discovery), state}
+  @impl true
+  def handle_call(:peers, _from, state) do
+    peers =
+      state.discovery
+      |> Discovery.peers()
+      |> Map.values()
+      |> Enum.map(fn p -> %{id: p.id, metadata: Map.get(p, :metadata, %{})} end)
+
+    {:reply, peers, state}
+  end
+
+  @impl true
   def handle_call(:stored, _from, state), do: {:reply, store_list(state), state}
 
   @impl true
-  def handle_info({:EXIT, pid, reason}, state) do
-    case adapter_by_pid(state.adapters, pid) do
-      nil -> {:noreply, state}
-      {name, _adapter} -> {:stop, {:transport_exit, name, reason}, state}
-    end
+  def handle_info({:EXIT, pid, _reason}, state) do
+    adapters =
+      state.adapters
+      |> Enum.reject(fn {_transport, adapter} -> adapter == pid end)
+      |> Map.new()
+
+    {:noreply, %{state | adapters: adapters}}
   end
 
+  @impl true
   def handle_info({:transport_up, peer_id, metadata}, state) do
-    transport = transport_for_peer(metadata, state)
+    # Transport identity prefers explicit value from forwarded :transport_up
+    # metadata (supplied by external sub-transport when it emits to us as
+    # event_target). Sentinel avoids nil-transport in peer_routes/discovery.
+    transport =
+      if is_map(metadata) do
+        Map.get(metadata, :transport) || Map.get(metadata, "transport") || :mesh_transitional
+      else
+        :mesh_transitional
+      end
+
     :ok = Discovery.peer_up(state.discovery, transport, peer_id, metadata)
 
     state = put_peer_route(state, peer_id, transport, metadata)
@@ -117,28 +158,35 @@ defmodule Mob.Mesh.MeshBridge do
     )
 
     replay_stored(peer_id, state)
+    # Legacy shape (see moduledoc NOTE)
     send(state.event_target, {:transport_up, peer_id, metadata})
 
     {:noreply, state}
   end
 
+  @impl true
   def handle_info({:transport_down, peer_id}, state) do
     :ok = Discovery.peer_down(state.discovery, peer_id)
     Telemetry.emit([:peer, :down], %{count: 1}, %{node_id: state.node_id, peer_id: peer_id})
+    # Legacy shape (see moduledoc NOTE)
     send(state.event_target, {:transport_down, peer_id})
     {:noreply, %{state | peer_routes: Map.delete(state.peer_routes, peer_id)}}
   end
 
+  @impl true
   def handle_info({:frame, peer_id, frame}, state) do
     state = handle_inbound_frame(peer_id, frame, state)
     {:noreply, state}
   end
 
+  @impl true
   def handle_info({:transport_error, reason}, state) do
+    # Legacy shape (see moduledoc NOTE)
     send(state.event_target, {:transport_error, reason})
     {:noreply, state}
   end
 
+  @impl true
   def handle_info(_message, state), do: {:noreply, state}
 
   defp handle_inbound_frame(peer_id, frame, state) do
@@ -147,6 +195,7 @@ defmodule Mob.Mesh.MeshBridge do
         handle_envelope(peer_id, envelope, state)
 
       :error ->
+        # Legacy non-envelope frame passthrough (see moduledoc NOTE)
         send(state.event_target, {:frame, peer_id, frame})
         state
     end
@@ -158,6 +207,7 @@ defmodule Mob.Mesh.MeshBridge do
         state
 
       local_destination?(envelope, state) ->
+        # Mesh-delivered payload (legacy delivery shape retained in transitional)
         send(state.event_target, {:frame, envelope.source, envelope.payload})
         state = remember(envelope.id, state)
 
@@ -193,8 +243,8 @@ defmodule Mob.Mesh.MeshBridge do
     case Router.route(envelope, state.peer_routes, opts) do
       {:direct, transport, peer_id} ->
         reply = send_envelope(state, transport, peer_id, envelope)
-        if reply != :ok, do: report_send_error(state, envelope, [{transport, peer_id, reply}])
         if reply == :ok, do: emit_sent(envelope, state, [{transport, peer_id}])
+        if reply != :ok, do: report_send_error(state, envelope, [{transport, peer_id, reply}])
         {reply, state}
 
       {:flood, targets} ->
@@ -226,9 +276,9 @@ defmodule Mob.Mesh.MeshBridge do
   end
 
   defp send_envelope(state, transport, peer_id, envelope) do
-    with {:ok, adapter} <- fetch_adapter(state, transport),
-         {:ok, frame} <- encode(envelope) do
-      Adapter.send_frame(adapter, peer_id, frame, [])
+    case Map.fetch(state.adapters, transport) do
+      {:ok, adapter} -> Adapter.send_frame(adapter, peer_id, encode(envelope), [])
+      :error -> {:error, :mesh_transitional_no_internal_adapter}
     end
   end
 
@@ -238,12 +288,12 @@ defmodule Mob.Mesh.MeshBridge do
         {transport, peer_id, send_envelope(state, transport, peer_id, envelope)}
       end)
 
-    failures = Enum.reject(results, fn {_transport, _peer_id, result} -> result == :ok end)
+    failures = Enum.reject(results, fn {_transport, _peer_id, reply} -> reply == :ok end)
 
-    if Enum.any?(results, fn {_transport, _peer_id, result} -> result == :ok end) do
-      {:ok, failures}
-    else
+    if length(failures) == length(results) do
       {{:error, {:no_successful_relay, results}}, failures}
+    else
+      {:ok, failures}
     end
   end
 
@@ -258,12 +308,11 @@ defmodule Mob.Mesh.MeshBridge do
       reason: reason
     })
 
+    # Legacy error shape (see moduledoc NOTE)
     send(state.event_target, {:transport_error, reason})
   end
 
-  defp encode(%Envelope{} = envelope) do
-    {:ok, :erlang.term_to_binary({@magic, envelope})}
-  end
+  defp encode(%Envelope{} = envelope), do: :erlang.term_to_binary({@magic, envelope})
 
   defp decode(frame) when is_binary(frame) do
     case safe_binary_to_term(frame) do
@@ -328,38 +377,30 @@ defmodule Mob.Mesh.MeshBridge do
   end
 
   defp start_adapters(transports) do
-    Enum.reduce_while(transports, {:ok, %{}}, fn transport_spec, {:ok, adapters} ->
-      with {:ok, name, transport, opts} <- normalize_transport_spec(transport_spec),
-           {:ok, pid} <- Adapter.start_link([transport: transport, event_target: self()] ++ opts) do
+    Enum.reduce_while(transports, {:ok, %{}}, fn spec, {:ok, adapters} ->
+      with {:ok, name, transport, opts} <- normalize_transport_spec(spec),
+           adapter_opts =
+             opts
+             |> Keyword.put(:transport, transport)
+             |> Keyword.put(:event_target, self()),
+           {:ok, pid} <- Adapter.start_link(adapter_opts) do
         {:cont, {:ok, Map.put(adapters, name, pid)}}
       else
-        {:error, reason} -> {:halt, {:error, {:transport_start_failed, transport_spec, reason}}}
+        {:error, reason} ->
+          Enum.each(adapters, fn {_name, pid} -> Adapter.stop(pid) end)
+          {:halt, {:error, {:adapter_start_failed, spec, reason}}}
       end
     end)
   end
 
+  defp normalize_transport_spec({name, transport, opts})
+       when is_atom(name) and is_atom(transport) and is_list(opts),
+       do: {:ok, name, transport, opts}
+
   defp normalize_transport_spec({name, transport}) when is_atom(name) and is_atom(transport),
     do: {:ok, name, transport, []}
 
-  defp normalize_transport_spec({name, transport, opts})
-       when is_atom(name) and is_atom(transport) and is_list(opts) do
-    {:ok, name, transport, opts}
-  end
-
-  defp normalize_transport_spec(transport) when is_atom(transport),
-    do: {:ok, transport, transport, []}
-
   defp normalize_transport_spec(other), do: {:error, {:invalid_transport_spec, other}}
-
-  defp transport_for_peer(metadata, state) when is_map(metadata) do
-    Map.get(metadata, :transport) || Map.get(metadata, "transport") || default_transport(state)
-  end
-
-  defp transport_for_peer(_metadata, state), do: default_transport(state)
-
-  defp default_transport(state) do
-    state.adapters |> Map.keys() |> List.first()
-  end
 
   defp put_peer_route(state, peer_id, transport, metadata) do
     route = %{
@@ -369,17 +410,6 @@ defmodule Mob.Mesh.MeshBridge do
     }
 
     %{state | peer_routes: Map.put(state.peer_routes, peer_id, route)}
-  end
-
-  defp fetch_adapter(state, transport) do
-    case Map.fetch(state.adapters, transport) do
-      {:ok, adapter} -> {:ok, adapter}
-      :error -> {:error, {:unknown_transport, transport}}
-    end
-  end
-
-  defp adapter_by_pid(adapters, pid) do
-    Enum.find(adapters, fn {_name, adapter} -> adapter == pid end)
   end
 
   defp remember(id, state) do
@@ -393,25 +423,19 @@ defmodule Mob.Mesh.MeshBridge do
   end
 
   defp emit_sent(envelope, state, targets) do
-    Telemetry.emit([:message, :sent], message_measurements(envelope, state), %{
-      node_id: state.node_id,
-      message_id: envelope.id,
-      destination: envelope.destination,
-      targets: targets
-    })
+    Telemetry.emit(
+      [:message, :sent],
+      message_measurements(envelope, state),
+      Map.put(message_metadata(envelope, state), :targets, targets)
+    )
   end
 
-  defp emit_relay_result(:ok, envelope, state, targets, failures) do
-    successful_targets =
-      targets -- Enum.map(failures, fn {transport, peer_id, _reason} -> {transport, peer_id} end)
-
-    Telemetry.emit([:message, :relayed], message_measurements(envelope, state), %{
-      node_id: state.node_id,
-      message_id: envelope.id,
-      destination: envelope.destination,
-      targets: successful_targets,
-      failures: failures
-    })
+  defp emit_relay_result(:ok, envelope, state, targets, _failures) do
+    Telemetry.emit(
+      [:message, :relayed],
+      message_measurements(envelope, state),
+      Map.put(message_metadata(envelope, state), :targets, targets)
+    )
   end
 
   defp emit_relay_result({:error, _reason}, _envelope, _state, _targets, _failures), do: :ok

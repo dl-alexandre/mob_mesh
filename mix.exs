@@ -39,13 +39,22 @@ defmodule Mob.Mesh.MixProject do
   end
 
   defp deps do
-    [
-      {:mob_transport, github: "dl-alexandre/mob_transport"},
-      {:telemetry, "~> 1.3"},
-      {:credo, "~> 1.7", only: :dev, runtime: false},
-      {:dialyxir, "~> 1.4", only: :dev, runtime: false},
-      {:ex_doc, "~> 0.40.2", only: :dev, runtime: false}
-    ]
+    transport_dep() ++
+      [
+        {:telemetry, "~> 1.3"},
+        {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+        {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+        {:ex_doc, "~> 0.40.2", only: :dev, runtime: false}
+      ]
+  end
+
+  # Mesh has a hard runtime dependency on Mob.Transport.Adapter. Resolve it from
+  # the sibling app inside the umbrella; fall back to the source repo for a
+  # standalone checkout (mob_transport is not yet published to Hex).
+  defp transport_dep do
+    if File.exists?(Path.expand("../mob_transport/mix.exs", __DIR__)),
+      do: [{:mob_transport, in_umbrella: true}],
+      else: [{:mob_transport, github: "dl-alexandre/mob_transport"}]
   end
 
   defp dialyzer do

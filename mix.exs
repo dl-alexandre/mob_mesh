@@ -11,6 +11,7 @@ defmodule Mob.Mesh.MixProject do
       version: @version,
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
+      test_coverage: [summary: [threshold: 90]],
       deps: deps(),
       dialyzer: dialyzer(),
       description: @description,
